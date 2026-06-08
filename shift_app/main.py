@@ -10,11 +10,8 @@ st.set_page_config(page_title="シフト管理システム", page_icon="📅", l
 # --- スマホ・リッチUI対応のカスタムCSS ---
 st.markdown("""
 <style>
-    /* 全体的なフォントサイズの拡大（スマホでの視認性向上） */
     html, body, [class*="css"]  { font-size: 16px; }
-    /* ボタンを大きくして押しやすく */
     .stButton>button { border-radius: 8px; font-weight: bold; padding: 0.5rem 1rem; }
-    /* カレンダービューのスタイル */
     .cal-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; table-layout: fixed; }
     .cal-th { background-color: #f0f2f6; border: 1px solid #ddd; padding: 8px; text-align: center; color: #333;}
     .cal-td { border: 1px solid #ddd; padding: 4px; vertical-align: top; height: 100px; background-color: #fff;}
@@ -27,7 +24,6 @@ st.markdown("""
 DATA_FILE = "shift_data_v2.csv"
 USER_FILE = "users.csv"
 
-# プルダウン用の時間リスト（30分刻み）
 TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 
 def load_data():
@@ -96,11 +92,10 @@ if col2.button("ログアウト", use_container_width=True):
 
 st.divider()
 
-# タブ構成
 tab1, tab2, tab3, tab4 = st.tabs(["⚡ 一括入力", "✍️ 個別入力", "📆 カレンダー", "⚙️ 管理"])
 
 # ==========================================
-# 【タブ1】1ヶ月一括入力（プルダウン＆エラーハイライト）
+# 【タブ1】1ヶ月一括入力（修正箇所）
 # ==========================================
 with tab1:
     col_y, col_m = st.columns(2)
@@ -127,17 +122,11 @@ with tab1:
     else:
         bulk_df = existing_data.drop(columns=["名前"]).sort_values("日付")
 
-    # バリデーションチェック関数（エラー行を赤くする）
-    def highlight_errors(row):
-        is_error = (not row["休み"]) and (row["開始"] >= row["終了"])
-        color = 'background-color: #ffe6e6; color: #cc0000; font-weight: bold;' if is_error else ''
-        return [color] * len(row)
-
     st.caption("💡 開始・終了時間はタップしてプルダウンから選択できます。")
 
-    # Stylerを適用してエディターを表示
+    # 修正: bulk_df.style.apply() を外し、純粋なデータフレームを渡す
     edited_bulk = st.data_editor(
-        bulk_df.style.apply(highlight_errors, axis=1),
+        bulk_df,
         hide_index=True,
         use_container_width=True,
         column_config={
@@ -154,11 +143,10 @@ with tab1:
     has_error = not error_rows.empty
 
     if has_error:
-        st.error("🚨 【エラー】終了時間が開始時間より早い（または同じ）日が赤くハイライトされています。修正してください。")
+        st.error("🚨 【入力エラー】終了時間が開始時間より早い（または同じ）日があります。時間を修正してください。")
     
     btn_text = "🔄 更新する" if is_update else "✅ 登録する"
     
-    # エラーがある場合はボタンを無効化
     if st.button(btn_text, type="primary", use_container_width=True, disabled=has_error):
         edited_bulk["名前"] = current_user
         df = df.drop(existing_data.index)
@@ -168,7 +156,7 @@ with tab1:
         st.rerun()
 
 # ==========================================
-# 【タブ2】個別入力（プルダウン対応）
+# 【タブ2】個別入力
 # ==========================================
 with tab2:
     target_date = st.date_input("日付を選択")
@@ -194,7 +182,6 @@ with tab2:
         end_time = c2.selectbox("終了", options=TIME_OPTIONS, index=TIME_OPTIONS.index(default_end))
         note = st.text_input("備考", value=default_note)
         
-        # 個別入力のバリデーション
         is_single_error = (not is_off) and (start_time >= end_time)
         if is_single_error:
             st.error("🚨 終了時間は開始時間より後にしてください")
@@ -214,7 +201,7 @@ with tab2:
                 st.rerun()
 
 # ==========================================
-# 【タブ3】📆 カレンダービュー（管理者向け）
+# 【タブ3】📆 カレンダービュー
 # ==========================================
 with tab3:
     st.markdown("### チーム全体のカレンダー")
@@ -222,7 +209,6 @@ with tab3:
     c_year = cal_y.selectbox("表示年", range(2024, 2030), index=datetime.now().year - 2024, key="cy")
     c_month = cal_m.selectbox("表示月", range(1, 13), index=datetime.now().month - 1, key="cm")
 
-    # カレンダーHTMLの生成
     cal_html = '<table class="cal-table"><thead><tr>'
     for day_name in ["月", "火", "水", "木", "金", "土", "日"]:
         cal_html += f'<th class="cal-th">{day_name}</th>'
@@ -238,7 +224,6 @@ with tab3:
             else:
                 cal_html += f'<td class="cal-td"><div class="cal-day">{day}</div>'
                 
-                # その日のシフトデータを取得
                 day_date = date(c_year, c_month, day)
                 day_shifts = df[df["日付"] == day_date]
                 
@@ -254,7 +239,7 @@ with tab3:
     st.markdown(cal_html, unsafe_allow_html=True)
 
 # ==========================================
-# 【タブ4】管理画面（直接編集）
+# 【タブ4】管理画面
 # ==========================================
 with tab4:
     if not df.empty:
