@@ -26,11 +26,25 @@ USER_FILE = "users.csv"
 
 TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 
+# --- データの読み込みと厳格な型変換（エラー対策の要） ---
 def load_data():
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE)
-        df["日付"] = pd.to_datetime(df["日付"]).dt.date
+        # 日付を確実にDate型へ
+        df["日付"] = pd.to_datetime(df["日付"], errors='coerce').dt.date
+        
+        # 休みを確実にBoolean（True/False）へ
+        if "休み" in df.columns:
+            df["休み"] = df["休み"].astype(str).str.lower().isin(["true", "1", "t", "y", "yes"])
+        else:
+            df["休み"] = False
+            
+        # 文字列（プルダウン・備考）の空っぽ（NaN）を空文字に変換し、確実にString型へ
+        df["開始"] = df["開始"].fillna("").astype(str).replace("nan", "")
+        df["終了"] = df["終了"].fillna("").astype(str).replace("nan", "")
+        df["備考"] = df["備考"].fillna("").astype(str).replace("nan", "")
         return df
+        
     return pd.DataFrame(columns=["名前", "日付", "開始", "終了", "休み", "備考"])
 
 def load_users():
@@ -95,7 +109,7 @@ st.divider()
 tab1, tab2, tab3, tab4 = st.tabs(["⚡ 一括入力", "✍️ 個別入力", "📆 カレンダー", "⚙️ 管理"])
 
 # ==========================================
-# 【タブ1】1ヶ月一括入力（修正箇所）
+# 【タブ1】1ヶ月一括入力
 # ==========================================
 with tab1:
     col_y, col_m = st.columns(2)
@@ -122,9 +136,15 @@ with tab1:
     else:
         bulk_df = existing_data.drop(columns=["名前"]).sort_values("日付")
 
+    # Streamlitに渡す直前に、もう一度型をガチガチに固定する（ここでエラーを防ぐ）
+    bulk_df["日付"] = pd.to_datetime(bulk_df["日付"]).dt.date
+    bulk_df["休み"] = bulk_df["休み"].astype(bool)
+    bulk_df["開始"] = bulk_df["開始"].astype(str)
+    bulk_df["終了"] = bulk_df["終了"].astype(str)
+    bulk_df["備考"] = bulk_df["備考"].astype(str)
+
     st.caption("💡 開始・終了時間はタップしてプルダウンから選択できます。")
 
-    # 修正: bulk_df.style.apply() を外し、純粋なデータフレームを渡す
     edited_bulk = st.data_editor(
         bulk_df,
         hide_index=True,
@@ -138,7 +158,6 @@ with tab1:
         }
     )
 
-    # エラーチェック（開始時刻 >= 終了時刻 の行があるか）
     error_rows = edited_bulk[(~edited_bulk["休み"]) & (edited_bulk["開始"] >= edited_bulk["終了"])]
     has_error = not error_rows.empty
 
