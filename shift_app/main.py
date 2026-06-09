@@ -5,36 +5,24 @@ from datetime import datetime, date, timedelta
 import calendar
 
 # --- ページ設定 ---
-st.set_page_config(page_title="シフト管理システム", page_icon="📅", layout="centered") # スマホ向けにcenteredに変更
+st.set_page_config(page_title="シフト管理システム", page_icon="📅", layout="centered")
 
-# --- スマホ・リッチUI対応のカスタムCSS ---
+# --- スマホ・SaaS風リッチUI対応のカスタムCSS ---
 st.markdown("""
 <style>
-    /* 全体フォントサイズとテーマカラーの設定 */
     html, body, [class*="css"]  { font-size: 16px; font-family: 'Helvetica Neue', Arial, sans-serif; }
-    
-    /* ボタンの丸みとリッチ化 */
     .stButton>button { border-radius: 12px; font-weight: bold; padding: 0.6rem 1rem; transition: 0.2s; }
-    
-    /* メトリック（ダッシュボードの数字）のリッチ化 */
-    div[data-testid="stMetric"] {
-        background-color: #f0f7ff; 
-        padding: 15px 20px; 
-        border-radius: 15px; 
-        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        border-left: 5px solid #007BFF;
-    }
-    
-    /* カードコンテナのスタイル調整 */
+    div[data-testid="stMetric"] { background-color: #f0f7ff; padding: 15px 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-left: 5px solid #007BFF; }
     div[data-testid="stForm"] > div { padding: 0; }
     
-    /* カレンダービュー用 */
     .cal-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; table-layout: fixed; }
     .cal-th { background-color: #f0f2f6; border: 1px solid #ddd; padding: 6px; text-align: center; color: #333;}
-    .cal-td { border: 1px solid #ddd; padding: 2px; vertical-align: top; height: 80px; background-color: #fff;}
+    .cal-td { border: 1px solid #ddd; padding: 2px; vertical-align: top; height: 95px; background-color: #fff;}
     .cal-day { font-weight: bold; background: #fafafa; border-bottom: 1px solid #eee; text-align: right; padding-right: 5px; color: #555;}
-    .cal-shift { background-color: #e6f3ff; color: #0055a4; padding: 2px; margin: 1px 0; border-radius: 3px; font-size: 0.75rem;}
-    .cal-shift-off { background-color: #ffeeee; color: #cc0000; padding: 2px; margin: 1px 0; border-radius: 3px; font-size: 0.75rem;}
+    
+    .cal-shift { background-color: #e6f3ff; color: #0055a4; padding: 4px; margin: 2px 0; border-radius: 4px; font-size: 0.75rem; border-left: 4px solid #0055a4; line-height: 1.3;}
+    .cal-shift-off { background-color: #ffeeee; color: #cc0000; padding: 4px; margin: 2px 0; border-radius: 4px; font-size: 0.75rem; border-left: 4px solid #cc0000;}
+    .role-badge { display: inline-block; font-size: 0.6rem; background: #fff; color: #333; padding: 1px 4px; border-radius: 3px; border: 1px solid #ccc; margin-bottom: 2px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -42,8 +30,9 @@ DATA_FILE = "shift_data_v2.csv"
 USER_FILE = "users.csv"
 
 TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+ROLE_OPTIONS = ["未定", "ホール", "キッチン", "レジ", "リーダー"]
+REST_OPTIONS = ["なし", "45分", "1時間", "1.5時間"]
 
-# --- データの読み込みと厳格な型変換 ---
 def load_data():
     if os.path.exists(DATA_FILE):
         df = pd.read_csv(DATA_FILE)
@@ -52,11 +41,18 @@ def load_data():
             df["休み"] = df["休み"].astype(str).str.lower().isin(["true", "1", "t", "y", "yes"])
         else:
             df["休み"] = False
+            
+        for col in ["役割", "休憩"]:
+            if col not in df.columns:
+                df[col] = ""
+                
         df["開始"] = df["開始"].fillna("").astype(str).replace("nan", "")
         df["終了"] = df["終了"].fillna("").astype(str).replace("nan", "")
+        df["役割"] = df["役割"].fillna("").astype(str).replace("nan", "")
+        df["休憩"] = df["休憩"].fillna("").astype(str).replace("nan", "")
         df["備考"] = df["備考"].fillna("").astype(str).replace("nan", "")
         return df
-    return pd.DataFrame(columns=["名前", "日付", "開始", "終了", "休み", "備考"])
+    return pd.DataFrame(columns=["名前", "日付", "役割", "開始", "終了", "休憩", "休み", "備考"])
 
 def load_users():
     if os.path.exists(USER_FILE):
@@ -113,14 +109,13 @@ if col_btn.button("ログアウト", use_container_width=True):
     st.session_state.logged_in = False
     st.rerun()
 
-# 💡【改善アイデア3】ダッシュボード領域
+# --- ダッシュボード ---
 st.markdown(f"#### 👤 {current_user} さんの今月の状況")
 now = datetime.now()
 current_month_data = df[(df["名前"] == current_user) & 
                         (pd.to_datetime(df["日付"]).dt.year == now.year) & 
                         (pd.to_datetime(df["日付"]).dt.month == now.month)]
 
-# 出勤日数と想定勤務時間の計算
 work_days = len(current_month_data[current_month_data["休み"] == False])
 total_hours = 0.0
 
@@ -129,43 +124,77 @@ for _, row in current_month_data[current_month_data["休み"] == False].iterrows
         s = datetime.strptime(row["開始"], "%H:%M")
         e = datetime.strptime(row["終了"], "%H:%M")
         diff = (e - s).total_seconds() / 3600
+        
+        rest_str = str(row["休憩"])
+        rest_h = 0.0
+        if rest_str == "45分": rest_h = 0.75
+        elif rest_str == "1時間": rest_h = 1.0
+        elif rest_str == "1.5時間": rest_h = 1.5
+        
+        diff = max(0, diff - rest_h)
         if diff > 0:
             total_hours += diff
     except:
         pass
 
-# リッチなメトリック表示
 m1, m2 = st.columns(2)
-m1.metric("今月の出勤予定日数", f"{work_days} 日")
-m2.metric("想定勤務時間", f"{total_hours:.1f} 時間")
+m1.metric("今月の出勤日数", f"{work_days} 日")
+m2.metric("想定労働時間", f"{total_hours:.1f} 時間")
 
 st.divider()
 
-# タブ構成（カード入力タブをメインに）
-tab1, tab2, tab3 = st.tabs(["✍️ 1週間カード入力", "📆 チームカレンダー", "⚙️ 管理"])
+tab1, tab2, tab3 = st.tabs(["✍️ 1週間入力", "📆 チームカレンダー", "⚙️ 管理"])
 
 # ==========================================
-# 💡【改善アイデア2】スマホ向け：1週間カード型入力
+# 【タブ1】1週間カード型入力
 # ==========================================
 with tab1:
     st.markdown("### 📝 シフト入力（1週間分）")
-    st.caption("週の開始日を選ぶと、7日分の入力カードが表示されます。")
     
-    start_date = st.date_input("週の開始日", value=date.today())
+    selected_date = st.date_input("基準となる日付を選択", value=date.today())
+    start_date = selected_date - timedelta(days=selected_date.weekday()) 
     
+    st.info(f"📅 【自動調整】 **{start_date.strftime('%Y/%m/%d')} (月) 〜** の1週間を表示しています")
+    
+    # 💡【機能強化】前週のデータをコピーするボタン
+    prev_start = start_date - timedelta(days=7)
+    prev_end = prev_start + timedelta(days=6)
+    
+    if st.button(f"⏪ 前週 ({prev_start.strftime('%m/%d')}〜) のシフトをコピーする", use_container_width=True):
+        prev_data = df[(df["名前"] == current_user) & (df["日付"] >= prev_start) & (df["日付"] <= prev_end)]
+        
+        if prev_data.empty:
+            st.warning("⚠️ コピー元の前週データが登録されていません。")
+        else:
+            # 今週の既存データを一旦削除
+            current_end = start_date + timedelta(days=6)
+            df = df[~((df["名前"] == current_user) & (df["日付"] >= start_date) & (df["日付"] <= current_end))]
+            
+            # 日付を7日進めて新しいデータを作成
+            new_rows = []
+            for _, row in prev_data.iterrows():
+                r = row.copy()
+                r["日付"] = r["日付"] + timedelta(days=7)
+                new_rows.append(r)
+                
+            df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+            df.to_csv(DATA_FILE, index=False)
+            st.success("✅ 前週のシフトを反映しました！下のカードで微調整が可能です。")
+            st.rerun()
+
     with st.form("weekly_card_form"):
         form_data = []
         
-        # 7日分のカードを縦に生成
         for i in range(7):
             d = start_date + timedelta(days=i)
             weekdays = ["月", "火", "水", "木", "金", "土", "日"]
             
-            # 既存データの取得
             existing = df[(df["名前"] == current_user) & (df["日付"] == d)]
             def_off = False
             def_start = "09:00"
             def_end = "18:00"
+            def_role = "未定"
+            def_rest = "なし"
             def_note = ""
             
             if not existing.empty:
@@ -173,30 +202,31 @@ with tab1:
                 def_off = bool(r["休み"])
                 def_start = r["開始"] if r["開始"] in TIME_OPTIONS else "09:00"
                 def_end = r["終了"] if r["終了"] in TIME_OPTIONS else "18:00"
+                def_role = r["役割"] if r["役割"] in ROLE_OPTIONS else "未定"
+                def_rest = r["休憩"] if r["休憩"] in REST_OPTIONS else "なし"
                 def_note = r["備考"]
             
-            # カード風のUI（st.container(border=True) を使用）
             with st.container(border=True):
-                # 日付と曜日
                 st.markdown(f"**{d.strftime('%m/%d')} ({weekdays[d.weekday()]})**")
-                
-                # モバイルフレンドリーなトグルスイッチ
                 is_off = st.toggle("この日は休み", value=def_off, key=f"off_{i}")
                 
-                c1, c2 = st.columns(2)
-                start_val = c1.selectbox("開始", TIME_OPTIONS, index=TIME_OPTIONS.index(def_start), key=f"start_{i}")
-                end_val = c2.selectbox("終了", TIME_OPTIONS, index=TIME_OPTIONS.index(def_end), key=f"end_{i}")
-                note_val = st.text_input("備考（任意）", value=def_note, key=f"note_{i}", placeholder="例: 早退希望など")
+                c1, c2, c3, c4 = st.columns(4)
+                role_val = c1.selectbox("役割", ROLE_OPTIONS, index=ROLE_OPTIONS.index(def_role), key=f"role_{i}")
+                start_val = c2.selectbox("開始", TIME_OPTIONS, index=TIME_OPTIONS.index(def_start), key=f"start_{i}")
+                end_val = c3.selectbox("終了", TIME_OPTIONS, index=TIME_OPTIONS.index(def_end), key=f"end_{i}")
+                rest_val = c4.selectbox("休憩", REST_OPTIONS, index=REST_OPTIONS.index(def_rest), key=f"rest_{i}")
                 
-                form_data.append((d, is_off, start_val, end_val, note_val))
+                note_val = st.text_input("備考", value=def_note, key=f"note_{i}", placeholder="例: 早退希望")
+                
+                form_data.append((d, is_off, role_val, start_val, end_val, rest_val, note_val))
 
         st.markdown("<br>", unsafe_allow_html=True)
-        submitted = st.form_submit_button("✅ 1週間分をまとめて保存する", use_container_width=True, type="primary")
+        submitted = st.form_submit_button("✅ 1週間分をまとめて保存", use_container_width=True, type="primary")
 
         if submitted:
             has_error = False
             for data in form_data:
-                d, is_off, start_val, end_val, note_val = data
+                d, is_off, role_val, start_val, end_val, rest_val, note_val = data
                 if not is_off and start_val >= end_val:
                     has_error = True
                     break
@@ -204,28 +234,26 @@ with tab1:
             if has_error:
                 st.error("🚨 【エラー】終了時間が開始時間より早い（または同じ）日があります。修正してください。")
             else:
-                # 7日分のデータを一気に更新
                 for data in form_data:
-                    d, is_off, start_val, end_val, note_val = data
-                    # 古いデータを削除
+                    d, is_off, role_val, start_val, end_val, rest_val, note_val = data
                     df = df[~((df["名前"] == current_user) & (df["日付"] == d))]
                     
                     start_str = start_val if not is_off else ""
                     end_str = end_val if not is_off else ""
                     
-                    new_row = pd.DataFrame([[current_user, d, start_str, end_str, is_off, note_val]], 
-                                           columns=["名前", "日付", "開始", "終了", "休み", "備考"])
+                    new_row = pd.DataFrame([[current_user, d, role_val, start_str, end_str, rest_val, is_off, note_val]], 
+                                           columns=["名前", "日付", "役割", "開始", "終了", "休憩", "休み", "備考"])
                     df = pd.concat([df, new_row], ignore_index=True)
                 
                 df.to_csv(DATA_FILE, index=False)
-                st.success("✅ 保存が完了しました！上のダッシュボードも更新されます。")
+                st.success("✅ 保存が完了しました！")
                 st.rerun()
 
 # ==========================================
 # 【タブ2】📆 チームカレンダー
 # ==========================================
 with tab2:
-    st.markdown("### チーム全体のカレンダー")
+    st.markdown("### チームカレンダー")
     cal_y, cal_m = st.columns(2)
     c_year = cal_y.selectbox("表示年", range(2024, 2030), index=now.year - 2024, key="cy")
     c_month = cal_m.selectbox("表示月", range(1, 13), index=now.month - 1, key="cm")
@@ -251,7 +279,8 @@ with tab2:
                     if r["休み"]:
                         cal_html += f'<div class="cal-shift-off">{r["名前"]}: 休</div>'
                     else:
-                        cal_html += f'<div class="cal-shift">{r["名前"]}<br>{r["開始"]}-{r["終了"]}</div>'
+                        role_html = f'<span class="role-badge">{r["役割"]}</span><br>' if r["役割"] and r["役割"] != "未定" else ""
+                        cal_html += f'<div class="cal-shift">{r["名前"]}<br>{role_html}{r["開始"]}-{r["終了"]}</div>'
                 cal_html += '</td>'
         cal_html += '</tr>'
     cal_html += '</tbody></table>'
@@ -263,11 +292,13 @@ with tab2:
 # ==========================================
 with tab3:
     if not df.empty:
-        st.caption("※管理用。全データを直接編集できます。")
-        # 直接編集用のデータフレーム型推論対策
+        st.caption("※全データを直接編集できます。")
         edit_df = df.copy()
         edit_df["日付"] = pd.to_datetime(edit_df["日付"]).dt.date
         edit_df["休み"] = edit_df["休み"].astype(bool)
+        
+        cols = ["名前", "日付", "役割", "開始", "終了", "休憩", "休み", "備考"]
+        edit_df = edit_df[cols]
         
         edited_df = st.data_editor(edit_df, num_rows="dynamic", use_container_width=True)
         if st.button("データベース上書き保存", type="primary"):
