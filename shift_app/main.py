@@ -7,19 +7,17 @@ import calendar
 # --- ページ設定 ---
 st.set_page_config(page_title="シフト管理システム", page_icon="📅", layout="centered")
 
-# --- スマホ・SaaS風リッチUI対応のカスタムCSS ---
+# --- カスタムCSS ---
 st.markdown("""
 <style>
     html, body, [class*="css"]  { font-size: 16px; font-family: 'Helvetica Neue', Arial, sans-serif; }
     .stButton>button { border-radius: 12px; font-weight: bold; padding: 0.6rem 1rem; transition: 0.2s; }
     div[data-testid="stMetric"] { background-color: #f0f7ff; padding: 15px 20px; border-radius: 15px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border-left: 5px solid #007BFF; }
     div[data-testid="stForm"] > div { padding: 0; }
-    
     .cal-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; table-layout: fixed; }
     .cal-th { background-color: #f0f2f6; border: 1px solid #ddd; padding: 6px; text-align: center; color: #333;}
     .cal-td { border: 1px solid #ddd; padding: 2px; vertical-align: top; height: 95px; background-color: #fff;}
     .cal-day { font-weight: bold; background: #fafafa; border-bottom: 1px solid #eee; text-align: right; padding-right: 5px; color: #555;}
-    
     .cal-shift { background-color: #e6f3ff; color: #0055a4; padding: 4px; margin: 2px 0; border-radius: 4px; font-size: 0.75rem; border-left: 4px solid #0055a4; line-height: 1.3;}
     .cal-shift-off { background-color: #ffeeee; color: #cc0000; padding: 4px; margin: 2px 0; border-radius: 4px; font-size: 0.75rem; border-left: 4px solid #cc0000;}
     .role-badge { display: inline-block; font-size: 0.6rem; background: #fff; color: #333; padding: 1px 4px; border-radius: 3px; border: 1px solid #ccc; margin-bottom: 2px;}
@@ -41,11 +39,9 @@ def load_data():
             df["休み"] = df["休み"].astype(str).str.lower().isin(["true", "1", "t", "y", "yes"])
         else:
             df["休み"] = False
-            
         for col in ["役割", "休憩"]:
             if col not in df.columns:
                 df[col] = ""
-                
         df["開始"] = df["開始"].fillna("").astype(str).replace("nan", "")
         df["終了"] = df["終了"].fillna("").astype(str).replace("nan", "")
         df["役割"] = df["役割"].fillna("").astype(str).replace("nan", "")
@@ -62,9 +58,12 @@ def load_users():
 df = load_data()
 users_df = load_users()
 
+# --- セッションステート（ログイン情報と通知メッセージ用） ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
+if "flash_msg" not in st.session_state:
+    st.session_state.flash_msg = None
 
 # ==========================================
 # 🔐 ログイン画面
@@ -83,19 +82,22 @@ if not st.session_state.logged_in:
                     st.session_state.username = username
                     st.rerun()
                 else:
-                    st.error("⚠️ ユーザー名またはパスワードが違います")
+                    st.error("🚨 [ERR-AUTH01] ユーザー名またはパスワードが違います")
     with tab_signup:
         with st.form("signup_form"):
             new_user = st.text_input("希望ユーザー名")
             new_pass = st.text_input("パスワード", type="password")
             if st.form_submit_button("登録", use_container_width=True):
                 if new_user in users_df["ユーザー名"].values:
-                    st.error("⚠️ その名前は既に使われています")
+                    st.error("🚨 [ERR-AUTH02] その名前は既に使われています")
                 elif new_user and new_pass:
-                    new_user_df = pd.DataFrame([[new_user, new_pass]], columns=["ユーザー名", "パスワード"])
-                    users_df = pd.concat([users_df, new_user_df], ignore_index=True)
-                    users_df.to_csv(USER_FILE, index=False)
-                    st.success("✅ 登録完了！ログインしてください")
+                    try:
+                        new_user_df = pd.DataFrame([[new_user, new_pass]], columns=["ユーザー名", "パスワード"])
+                        users_df = pd.concat([users_df, new_user_df], ignore_index=True)
+                        users_df.to_csv(USER_FILE, index=False)
+                        st.success("✅ 登録完了！ログインしてください")
+                    except Exception as e:
+                        st.error(f"❌ [ERR-SYS00] ユーザー登録に失敗しました。詳細: {e}")
     st.stop()
 
 # ==========================================
@@ -103,8 +105,13 @@ if not st.session_state.logged_in:
 # ==========================================
 current_user = st.session_state.username
 
+# リロード後に通知があれば表示して消す
+if st.session_state.flash_msg:
+    st.toast(st.session_state.flash_msg, icon="✅")
+    st.session_state.flash_msg = None
+
 col_title, col_btn = st.columns([3, 1])
-col_title.markdown(f"## 📱 シフトアプリ")
+col_title.markdown("## 📱 シフトアプリ")
 if col_btn.button("ログアウト", use_container_width=True):
     st.session_state.logged_in = False
     st.rerun()
@@ -156,7 +163,7 @@ with tab1:
     
     st.info(f"📅 【自動調整】 **{start_date.strftime('%Y/%m/%d')} (月) 〜** の1週間を表示しています")
     
-    # 💡【機能強化】前週のデータをコピーするボタン
+    # 前週コピ機能
     prev_start = start_date - timedelta(days=7)
     prev_end = prev_start + timedelta(days=6)
     
@@ -164,23 +171,25 @@ with tab1:
         prev_data = df[(df["名前"] == current_user) & (df["日付"] >= prev_start) & (df["日付"] <= prev_end)]
         
         if prev_data.empty:
-            st.warning("⚠️ コピー元の前週データが登録されていません。")
+            st.warning("⚠️ [ERR-CPY01] コピー元の前週データが登録されていません。")
         else:
-            # 今週の既存データを一旦削除
-            current_end = start_date + timedelta(days=6)
-            df = df[~((df["名前"] == current_user) & (df["日付"] >= start_date) & (df["日付"] <= current_end))]
-            
-            # 日付を7日進めて新しいデータを作成
-            new_rows = []
-            for _, row in prev_data.iterrows():
-                r = row.copy()
-                r["日付"] = r["日付"] + timedelta(days=7)
-                new_rows.append(r)
+            try:
+                current_end = start_date + timedelta(days=6)
+                df = df[~((df["名前"] == current_user) & (df["日付"] >= start_date) & (df["日付"] <= current_end))]
                 
-            df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-            df.to_csv(DATA_FILE, index=False)
-            st.success("✅ 前週のシフトを反映しました！下のカードで微調整が可能です。")
-            st.rerun()
+                new_rows = []
+                for _, row in prev_data.iterrows():
+                    r = row.copy()
+                    r["日付"] = r["日付"] + timedelta(days=7)
+                    new_rows.append(r)
+                    
+                df = pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
+                df.to_csv(DATA_FILE, index=False)
+                
+                st.session_state.flash_msg = "前週のシフトを反映しました！下のカードで微調整が可能です。"
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ [ERR-SYS01] データのコピー・保存に失敗しました。詳細: {e}")
 
     with st.form("weekly_card_form"):
         form_data = []
@@ -232,22 +241,25 @@ with tab1:
                     break
             
             if has_error:
-                st.error("🚨 【エラー】終了時間が開始時間より早い（または同じ）日があります。修正してください。")
+                st.error("🚨 [ERR-VAL01] 終了時間が開始時間より早い（または同じ）日があります。時間を修正してください。")
             else:
-                for data in form_data:
-                    d, is_off, role_val, start_val, end_val, rest_val, note_val = data
-                    df = df[~((df["名前"] == current_user) & (df["日付"] == d))]
+                try:
+                    for data in form_data:
+                        d, is_off, role_val, start_val, end_val, rest_val, note_val = data
+                        df = df[~((df["名前"] == current_user) & (df["日付"] == d))]
+                        
+                        start_str = start_val if not is_off else ""
+                        end_str = end_val if not is_off else ""
+                        
+                        new_row = pd.DataFrame([[current_user, d, role_val, start_str, end_str, rest_val, is_off, note_val]], 
+                                               columns=["名前", "日付", "役割", "開始", "終了", "休憩", "休み", "備考"])
+                        df = pd.concat([df, new_row], ignore_index=True)
                     
-                    start_str = start_val if not is_off else ""
-                    end_str = end_val if not is_off else ""
-                    
-                    new_row = pd.DataFrame([[current_user, d, role_val, start_str, end_str, rest_val, is_off, note_val]], 
-                                           columns=["名前", "日付", "役割", "開始", "終了", "休憩", "休み", "備考"])
-                    df = pd.concat([df, new_row], ignore_index=True)
-                
-                df.to_csv(DATA_FILE, index=False)
-                st.success("✅ 保存が完了しました！")
-                st.rerun()
+                    df.to_csv(DATA_FILE, index=False)
+                    st.session_state.flash_msg = "1週間分のシフトを保存しました！"
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ [ERR-SYS02] データの保存に失敗しました。詳細: {e}")
 
 # ==========================================
 # 【タブ2】📆 チームカレンダー
@@ -302,6 +314,9 @@ with tab3:
         
         edited_df = st.data_editor(edit_df, num_rows="dynamic", use_container_width=True)
         if st.button("データベース上書き保存", type="primary"):
-            edited_df.to_csv(DATA_FILE, index=False)
-            st.success("保存しました。")
-            st.rerun()
+            try:
+                edited_df.to_csv(DATA_FILE, index=False)
+                st.session_state.flash_msg = "データベースを上書き保存しました。"
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ [ERR-SYS03] データベースの保存に失敗しました。詳細: {e}")
