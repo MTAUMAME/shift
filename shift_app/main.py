@@ -21,17 +21,40 @@ st.markdown("""
     .cal-day { font-weight: bold; background: #fafafa; border-bottom: 1px solid #eee; text-align: right; padding-right: 5px; color: #555;}
     .cal-shift { background-color: #e6f3ff; color: #0055a4; padding: 4px; margin: 2px 0; border-radius: 4px; font-size: 0.75rem; border-left: 4px solid #0055a4; line-height: 1.3;}
     .cal-shift-off { background-color: #ffeeee; color: #cc0000; padding: 4px; margin: 2px 0; border-radius: 4px; font-size: 0.75rem; border-left: 4px solid #cc0000;}
+    .cal-shift-night { background-color: #3b2e5a; color: #fff; padding: 4px; margin: 2px 0; border-radius: 4px; font-size: 0.75rem; border-left: 4px solid #ffcc00; line-height: 1.3;}
     .role-badge { display: inline-block; font-size: 0.6rem; background: #fff; color: #333; padding: 1px 4px; border-radius: 3px; border: 1px solid #ccc; margin-bottom: 2px;}
 </style>
 """, unsafe_allow_html=True)
 
 DATA_FILE = "shift_data_v2.csv"
 USER_FILE = "users.csv"
-ADMIN_SECRET_CODE = "admin123" # 管理者になるための秘密のコード
+ADMIN_SECRET_CODE = "admin123"
 
 TIME_OPTIONS = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 ROLE_OPTIONS = ["未定", "ホール", "キッチン", "レジ", "リーダー"]
 REST_OPTIONS = ["なし", "45分", "1時間", "1.5時間"]
+
+# --- 💡【新機能】労働時間計算の共通関数（夜勤対応） ---
+def calculate_work_hours(start_str, end_str, rest_str):
+    if not start_str or not end_str:
+        return 0.0
+    try:
+        s = datetime.strptime(start_str, "%H:%M")
+        e = datetime.strptime(end_str, "%H:%M")
+        diff = (e - s).total_seconds() / 3600
+        
+        # 夜勤（日またぎ）対応: 終了が開始より早い場合は24時間を足す
+        if diff < 0:
+            diff += 24.0
+            
+        rest_h = 0.0
+        if rest_str == "45分": rest_h = 0.75
+        elif rest_str == "1時間": rest_h = 1.0
+        elif rest_str == "1.5時間": rest_h = 1.5
+        
+        return max(0, diff - rest_h)
+    except:
+        return 0.0
 
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -55,7 +78,6 @@ def load_data():
 def load_users():
     if os.path.exists(USER_FILE):
         df = pd.read_csv(USER_FILE).astype(str)
-        # 権限列がない古いデータへの対応（マイグレーション）
         if "権限" not in df.columns:
             df["権限"] = "一般"
         return df
@@ -64,7 +86,6 @@ def load_users():
 df = load_data()
 users_df = load_users()
 
-# --- セッションステート初期化 ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = ""
@@ -98,24 +119,20 @@ if not st.session_state.logged_in:
             new_user = st.text_input("希望ユーザー名")
             new_pass = st.text_input("パスワード（4文字以上）", type="password")
             admin_code = st.text_input("管理者コード（※一般スタッフは空欄）", type="password")
-            
             if st.form_submit_button("登録", use_container_width=True):
-                # ★ バリデーション強化
                 if len(new_pass) < 4:
-                    st.error("🚨 [ERR-VAL02] セキュリティのため、パスワードは4文字以上にしてください")
+                    st.error("🚨 [ERR-VAL02] パスワードは4文字以上にしてください")
                 elif new_user in users_df["ユーザー名"].values:
                     st.error("🚨 [ERR-AUTH02] そのユーザー名は既に使われています")
                 elif new_user and new_pass:
-                    # 権限の判定
                     role = "管理者" if admin_code == ADMIN_SECRET_CODE else "一般"
-                    
                     try:
                         new_user_df = pd.DataFrame([[new_user, new_pass, role]], columns=["ユーザー名", "パスワード", "権限"])
                         users_df = pd.concat([users_df, new_user_df], ignore_index=True)
                         users_df.to_csv(USER_FILE, index=False)
-                        st.success(f"✅ 登録完了！権限: {role} で登録しました。ログインしてください。")
+                        st.success(f"✅ 登録完了！権限: {role} で登録しました。")
                     except Exception as e:
-                        st.error(f"❌ [ERR-SYS00] ユーザー登録に失敗しました。詳細: {e}")
+                        st.error(f"❌ [ERR-SYS00] ユーザー登録失敗: {e}")
     st.stop()
 
 # ==========================================
@@ -134,63 +151,49 @@ if col_btn.button("ログアウト", use_container_width=True):
     st.session_state.logged_in = False
     st.rerun()
 
-# --- ダッシュボード（機能強化） ---
-st.markdown(f"#### 👤 {current_user} さんの状況")
+# --- ダッシュボード ---
 now = datetime.now()
 today = date.today()
-
 current_month_data = df[(df["名前"] == current_user) & 
                         (pd.to_datetime(df["日付"]).dt.year == now.year) & 
                         (pd.to_datetime(df["日付"]).dt.month == now.month) &
                         (df["休み"] == False)]
 
 work_days = len(current_month_data)
-total_hours = 0.0
-
-for _, row in current_month_data.iterrows():
-    try:
-        s = datetime.strptime(row["開始"], "%H:%M")
-        e = datetime.strptime(row["終了"], "%H:%M")
-        diff = (e - s).total_seconds() / 3600
-        
-        rest_str = str(row["休憩"])
-        rest_h = 0.0
-        if rest_str == "45分": rest_h = 0.75
-        elif rest_str == "1時間": rest_h = 1.0
-        elif rest_str == "1.5時間": rest_h = 1.5
-        
-        diff = max(0, diff - rest_h)
-        if diff > 0:
-            total_hours += diff
-    except:
-        pass
+total_hours = sum(calculate_work_hours(r["開始"], r["終了"], r["休憩"]) for _, r in current_month_data.iterrows())
 
 m1, m2 = st.columns(2)
 m1.metric("今月の出勤日数", f"{work_days} 日")
 m2.metric("想定労働時間", f"{total_hours:.1f} 時間")
 
-# 直近のシフト表示機能
-st.markdown("**🔜 直近の出勤予定**")
-upcoming_shifts = df[(df["名前"] == current_user) & (df["日付"] >= today) & (df["休み"] == False)].sort_values("日付").head(3)
-if upcoming_shifts.empty:
-    st.info("直近の出勤予定はありません。")
-else:
-    for _, r in upcoming_shifts.iterrows():
-        weekdays = ["月", "火", "水", "木", "金", "土", "日"]
-        wd = weekdays[pd.to_datetime(r["日付"]).weekday()]
-        st.markdown(f"<div class='next-shift-card'><b>{r['日付']} ({wd})</b> | 🕒 {r['開始']}〜{r['終了']} ({r['役割']})</div>", unsafe_allow_html=True)
+st.divider()
+
+# 💡【新機能】LINE共有機能
+with st.expander("📲 自分のシフトをLINEで共有する"):
+    upcoming_7_days = df[(df["名前"] == current_user) & (df["日付"] >= today) & (df["日付"] <= today + timedelta(days=6))].sort_values("日付")
+    
+    line_text = f"【{current_user}のシフト予定】\n"
+    weekdays = ["月", "火", "水", "木", "金", "土", "日"]
+    
+    if upcoming_7_days.empty:
+        line_text += "直近1週間のシフトは未登録です。\n"
+    else:
+        for _, r in upcoming_7_days.iterrows():
+            wd = weekdays[pd.to_datetime(r["日付"]).weekday()]
+            d_str = r["日付"].strftime('%m/%d')
+            if r["休み"]:
+                line_text += f"{d_str}({wd}) 休み\n"
+            else:
+                line_text += f"{d_str}({wd}) {r['開始']}〜{r['終了']} ({r['役割']})\n"
+                
+    st.text_area("以下のテキストをコピーして貼り付けてください", value=line_text, height=150)
 
 st.divider()
 
-# --- タブの動的生成（権限により出し分け） ---
-tab_titles = ["✍️ 1週間入力", "📆 チームカレンダー"]
-if is_admin:
-    tab_titles.append("👑 管理者専用機能")
-
-tabs = st.tabs(tab_titles)
+tabs = st.tabs(["✍️ 1週間入力", "📆 チームカレンダー", "👑 管理者機能"] if is_admin else ["✍️ 1週間入力", "📆 チームカレンダー"])
 
 # ==========================================
-# 【タブ1】1週間カード型入力（バリデーション強化）
+# 【タブ1】1週間カード型入力
 # ==========================================
 with tabs[0]:
     st.markdown("### 📝 シフト入力（1週間分）")
@@ -198,7 +201,6 @@ with tabs[0]:
     selected_date = st.date_input("基準となる日付を選択", value=today)
     start_date = selected_date - timedelta(days=selected_date.weekday()) 
     
-    # 前週コピー
     prev_start = start_date - timedelta(days=7)
     prev_end = prev_start + timedelta(days=6)
     
@@ -229,12 +231,7 @@ with tabs[0]:
             weekdays = ["月", "火", "水", "木", "金", "土", "日"]
             
             existing = df[(df["名前"] == current_user) & (df["日付"] == d)]
-            def_off = False
-            def_start = "09:00"
-            def_end = "18:00"
-            def_role = "未定"
-            def_rest = "なし"
-            def_note = ""
+            def_off = False; def_start = "09:00"; def_end = "18:00"; def_role = "未定"; def_rest = "なし"; def_note = ""
             
             if not existing.empty:
                 r = existing.iloc[0]
@@ -263,19 +260,26 @@ with tabs[0]:
 
         if submitted:
             has_error = False
+            work_days_count = 0
+            
             for data in form_data:
                 d, is_off, role_val, start_val, end_val, rest_val, note_val = data
                 if not is_off:
-                    # バリデーション1: 時間の逆転
-                    if start_val >= end_val:
-                        st.error(f"🚨 {d.strftime('%m/%d')} : 終了時間が開始時間より早い（または同じ）です。")
+                    work_days_count += 1
+                    # 💡【機能強化】開始と終了が同じ場合はエラー（夜勤またぎは許可）
+                    if start_val == end_val:
+                        st.error(f"🚨 [ERR-VAL01] {d.strftime('%m/%d')} : 開始時間と終了時間が同じです。")
                         has_error = True
-                    # バリデーション2: 労働基準法チェック（8時間以上の労働で休憩なし）
                     else:
-                        work_hours = (datetime.strptime(end_val, "%H:%M") - datetime.strptime(start_val, "%H:%M")).total_seconds() / 3600
+                        work_hours = calculate_work_hours(start_val, end_val, "なし") # 休憩を引く前の拘束時間
                         if work_hours > 8.0 and rest_val == "なし":
-                            st.error(f"🚨 {d.strftime('%m/%d')} : 労働時間が8時間を超える場合、休憩時間の取得が法律で義務付けられています。「休憩」を選択してください。")
+                            st.error(f"🚨 [ERR-VAL02] {d.strftime('%m/%d')} : 労働時間が8時間を超える場合、休憩の取得が法律で義務付けられています。")
                             has_error = True
+                            
+            # 💡【機能強化】7連勤アラート
+            if work_days_count == 7:
+                st.error("🚨 [ERR-VAL03] 7連勤以上のシフトは登録できません。必ず週に1日以上の「休み」を入れてください。")
+                has_error = True
             
             if not has_error:
                 try:
@@ -288,7 +292,7 @@ with tabs[0]:
                                                columns=["名前", "日付", "役割", "開始", "終了", "休憩", "休み", "備考"])
                         df = pd.concat([df, new_row], ignore_index=True)
                     df.to_csv(DATA_FILE, index=False)
-                    st.session_state.flash_msg = "シフトを保存し、ダッシュボードを更新しました。"
+                    st.session_state.flash_msg = "シフトを保存しました！"
                     st.rerun()
                 except Exception as e:
                     st.error(f"❌ 保存エラー: {e}")
@@ -322,48 +326,43 @@ with tabs[1]:
                         cal_html += f'<div class="cal-shift-off">{r["名前"]}: 休</div>'
                     else:
                         role_html = f'<span class="role-badge">{r["役割"]}</span><br>' if r["役割"] and r["役割"] != "未定" else ""
-                        cal_html += f'<div class="cal-shift">{r["名前"]}<br>{role_html}{r["開始"]}-{r["終了"]}</div>'
+                        # 💡 夜勤判定による色分け表示
+                        is_night = r["開始"] > r["終了"] if r["開始"] and r["終了"] else False
+                        shift_class = "cal-shift-night" if is_night else "cal-shift"
+                        night_mark = "(翌)" if is_night else ""
+                        
+                        cal_html += f'<div class="{shift_class}">{r["名前"]}<br>{role_html}{r["開始"]}-{r["終了"]}{night_mark}</div>'
                 cal_html += '</td>'
         cal_html += '</tr>'
     cal_html += '</tbody></table>'
     st.markdown(cal_html, unsafe_allow_html=True)
 
 # ==========================================
-# 【タブ3】👑 管理者専用機能（権限がある場合のみ）
+# 【タブ3】👑 管理者機能
 # ==========================================
-if len(tabs) > 2:
+if is_admin:
     with tabs[2]:
-        st.warning("⚠️ このタブは「管理者」権限を持つユーザーにのみ表示されています。")
-        
-        st.markdown("#### 1. 全従業員の今月稼働時間集計")
+        st.markdown("#### 1. 今月稼働時間集計（給与計算用）")
         if not df.empty:
             this_month_df = df[(pd.to_datetime(df["日付"]).dt.year == now.year) & 
                                (pd.to_datetime(df["日付"]).dt.month == now.month) & 
                                (df["休み"] == False)].copy()
-            
-            def calc_hours(row):
-                try:
-                    s = datetime.strptime(row["開始"], "%H:%M")
-                    e = datetime.strptime(row["終了"], "%H:%M")
-                    h = (e - s).total_seconds() / 3600
-                    rest_str = str(row["休憩"])
-                    if rest_str == "45分": h -= 0.75
-                    elif rest_str == "1時間": h -= 1.0
-                    elif rest_str == "1.5時間": h -= 1.5
-                    return max(0, h)
-                except:
-                    return 0.0
-                    
+                               
             if not this_month_df.empty:
-                this_month_df["実働時間"] = this_month_df.apply(calc_hours, axis=1)
+                this_month_df["実働時間"] = this_month_df.apply(lambda row: calculate_work_hours(row["開始"], row["終了"], row["休憩"]), axis=1)
                 summary_df = this_month_df.groupby("名前")["実働時間"].sum().reset_index()
                 summary_df = summary_df.sort_values("実働時間", ascending=False).reset_index(drop=True)
+                
                 st.dataframe(summary_df, use_container_width=True)
+                
+                # 💡【新機能】CSVエクスポートボタン
+                csv_data = summary_df.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 この集計データをCSVでダウンロード", csv_data, f"work_summary_{now.year}_{now.month}.csv", "text/csv")
             else:
                 st.info("今月の稼働データがありません。")
         
         st.divider()
-        st.markdown("#### 2. 全データ直接編集（強制修正用）")
+        st.markdown("#### 2. 全データ直接編集")
         if not df.empty:
             edit_df = df.copy()
             edit_df["日付"] = pd.to_datetime(edit_df["日付"]).dt.date
